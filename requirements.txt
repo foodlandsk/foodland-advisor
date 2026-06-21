@@ -1,0 +1,8 @@
+# Foodland AI Poradca -- backend v1
+#
+# Žiadne externé balíky nie sú potrebné. Backend je napísaný čisto v
+# Python štandardnej knižnici (http.server, json, urllib...), takže
+# `pip install` nie je nutný -- stačí Python 3.8+.
+#
+# Voliteľné (len ak chceš LLM režim s OPENAI_API_KEY): žiadny balík openai
+# tiež netreba, volanie OpenAI API je implementované cez urllib.
