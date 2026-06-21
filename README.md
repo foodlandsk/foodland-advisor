@@ -64,7 +64,7 @@ vždy vyprodukuje identický výstup.
 - `GET /health` -- počet načítaných produktov a knowledge záznamov, aktuálny režim.
 - `GET /products/search?q=...` -- čisté produktové vyhľadávanie nad feedom.
 - `GET /knowledge/search?q=...&lang=SK` -- vyhľadávanie nad FAQ/receptami/magazínom/cross-sell/alternatívami/Products_AI/IntentMapping, voliteľný jazykový filter.
-- `POST /ask` -- `{"question": "...", "lang": "SK"}` -- hlavný poradenský endpoint. Vždy vráti `mode` (`search_only` alebo `llm`), zoznam nájdených výsledkov (`results`) a -- ak otázka zasiahla nejaký recept -- aj `recipe_answers` s rozpisom ingrediencií a nákupných tipov.
+- `POST /ask` -- `{"question": "...", "lang": "SK", "session_id": "..."}` (`session_id` je voliteľný, pre follow-up otázky -- pozri nižšie) -- hlavný poradenský endpoint. Vždy vráti `mode` (`search_only` alebo `llm`), zoznam nájdených výsledkov (`results`) a -- ak otázka zasiahla nejaký recept (alebo ide o follow-up na predošlý recept v session) -- aj `recipe_answers` s rozpisom ingrediencií, nákupných tipov, súhrnným nákupným zoznamom a súvisiacimi tipmi.
 
 ## search_only vs. llm režim
 
@@ -79,6 +79,37 @@ pred spustením), backend automaticky prejde do `llm` režimu -- pošle
 OpenAI len nájdený kontext (žiadne vymýšľanie) a vráti odpoveď + reálne
 zdrojové URL. Pri zlyhaní volania (chýbajúci internet, zlý kľúč...) sa
 backend bezpečne vráti k `search_only` odpovedi -- `/ask` nikdy nevráti 500.
+
+## Nové funkcie (inšpirované Amazon/Walmart/Instacart AI nákupnými asistentmi)
+
+- **Obrázky produktov v chate** -- `/ask` aj `/knowledge/search` teraz k
+  produktovým zhodám (`product_match`, `cross_sell`, `alternative`,
+  `products_ai`) dopĺňajú `image_link`, dohľadaný spätným joinom na
+  `products.json` podľa reálneho `product_id`/`link` -- nikdy nevymyslený,
+  ak obrázok neexistuje, pole je prázdne.
+- **Súhrnný nákupný zoznam** -- `recipe_answers[].shopping_list` zoskupuje
+  ingrediencie receptu do jedného zoznamu (`items`) s reálnymi odkazmi a
+  počtami (`counts`: `ready`/`check`/`not_on_foodland`/`no_match`), nad
+  presne tými istými dátami, ktoré sa už zobrazujú pri jednotlivých
+  ingredienciách.
+- **Automatický cross-sell/alternatívy pri recepte** --
+  `recipe_answers[].related_suggestions` k zhodnutým produktom v recepte
+  doplní reálne cross-sell/alternatívne tipy z `foodland_knowledge.json`
+  (tabuľky `cross_sell`/`alternatives`, join cez `product_id`) -- ak pre
+  produkt žiadny tip v dátach nie je, pole ostáva prázdne.
+- **Pamäť konverzácie (follow-up otázky)** -- `/ask` teraz prijíma voliteľné
+  `session_id` (chat.html ho generuje pri načítaní stránky). Keď otázka
+  sama osebe nezasiahne žiadny recept, ale v session bol nedávno (30 min)
+  riešený recept, backend skontroluje, či sa otázka prekrýva s reálnym
+  textom niektorej jeho ingrediencie (napr. "a čo soľ?" po otázke na
+  Kimchi) -- ak áno, vráti `is_followup: true` a `followup_note` s názvom
+  receptu. **Dôležité obmedzenie:** keďže recept-vyhľadávanie (`search_recipes`)
+  nemá filter bežných slov ("je", "a", "vás"...), krátke follow-up otázky
+  často omylom zasiahnu nejaký recept priamo (cez zhodu na takéto bežné
+  slovo) -- v tom prípade sa vráti táto (síce reálna, ale nie vždy
+  najrelevantnejšia) priama zhoda namiesto `is_followup` odpovede. Funkcia
+  teda funguje spoľahlivo len pre otázky, ktoré cez bežné vyhľadávanie
+  nezasiahnu žiadny recept.
 
 ## Ingrediencie receptov -- ako sa vyberá produktový tip
 
@@ -135,4 +166,39 @@ V oboch prípadoch voliteľne doplň `OPENAI_API_KEY` v Settings → Variables,
 ak chceš `llm` režim -- `PORT` nastavuje Railway sám, nič k tomu netreba.
 
 **Dôležité obmedzenie:** `data/analytics.jsonl` sa píše na lokálny disk
-behu kontajnera. Railway disk bez prilože
+behu kontajnera. Railway disk bez priloženého Volume nie je trvalý medzi
+redeployami -- log otázok sa teda pri každom novom nasadení vynuluje. Pre
+v1 to nie je problém (rate limit je aj tak in-memory a resetuje sa rovnako),
+ale ak by si chcel/a log uchovávať dlhodobo, treba v Railway pripojiť Volume
+na `data/`.
+
+Podmienky bezplatného plánu Railway (kredit, limity) sa menia -- over si
+aktuálny stav na railway.com pred nasadením.
+
+## Známe obmedzenia
+
+- Automatický keyword/stem matcher pre ingrediencie je jednoduchý
+  (bez embeddingov), takže pri opisných slovách (napr. "tenké", "nakrájané")
+  občas vznikne slabšia `medium` zhoda, ktorá nemusí byť presná -- presne
+  preto je vždy oznámená s hedge formuláciou, nikdy ako istota. Počas
+  testovania tohto backendu som našiel a opravil chybu, kde sa pri
+  ingredienciách s opakovaným slovom (napr. "kóšer soli alebo ... soli")
+  rátalo opakovanie ako dva nezávislé signály a zhoda sa nesprávne
+  vykazovala ako `high` -- opravené, teraz korektne `medium`.
+- Backend je čisto Python stdlib (žiadny FastAPI/uvicorn), aby šlo spustiť
+  bez `pip install`. Ak by si neskôr chcel/a prejsť na FastAPI (napr. pre
+  async, OpenAPI docs, Pydantic validáciu), architektúra (`feed.py`,
+  `search.py`, oddelená logika v `main.py`) sa dá na FastAPI prepísať bez
+  zmeny dátovej vrstvy.
+- `/ask` v `llm` režime nebol odskúšaný naživo (nemám OpenAI kľúč) --
+  kód je napísaný a zapojený tak, aby pri zlyhaní volania bezpečne spadol
+  na `search_only`, ale samotné úspešné LLM volanie si over až s reálnym
+  kľúčom.
+- `search.py` nemá zoznam bežných slov (stopwords) -- krátke slová ako
+  "je", "a", "vás" sa počítajú ako plnohodnotné zhody. V praxi to znamená,
+  že aj otázky mimo tému (napr. o vrátení tovaru) môžu omylom "trafiť"
+  nejaký recept len cez takéto bežné slovo. Priamo to ovplyvňuje aj nový
+  follow-up mechanizmus (pozri vyššie) -- testované a overené priamym
+  jednotkovým testom správania `build_followup_answer`, integračne sa to
+  ale cez `/ask` prejaví len pri otázkach, ktoré takto omylom nezasiahnu
+  žiadny recept.

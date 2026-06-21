@@ -57,10 +57,74 @@ CONFIDENCE_LABEL = {
 PRODUCTS = search_mod.load_products()
 KNOWLEDGE = search_mod.load_knowledge()
 
+# Lookup tables for cross-referencing real data (never fabricated -- every
+# entry here comes straight from products.json / foodland_knowledge.json).
+PRODUCTS_BY_ID = {p["id"]: p for p in PRODUCTS if p.get("id")}
+PRODUCTS_BY_LINK = {p["link"]: p for p in PRODUCTS if p.get("link")}
+CROSS_SELL_BY_ID = {c["product_id"]: c for c in KNOWLEDGE.get("cross_sell", []) if c.get("product_id")}
+ALTERNATIVES_BY_ID = {a["product_id"]: a for a in KNOWLEDGE.get("alternatives", []) if a.get("product_id")}
+
+
+def image_for_link(link):
+    """Real product image for a given real product link, or '' if unknown.
+    Never guessed -- straight lookup against products.json by exact link."""
+    p = PRODUCTS_BY_LINK.get(link)
+    return p.get("image_link", "") if p else ""
+
+
+def enrich_results_with_images(results):
+    """products_ai / cross_sell / alternative rows don't carry image_link
+    themselves (they're built from xlsx tables, not the feed), so attach
+    the real product image by joining back to products.json. Plain
+    "product" results already have image_link natively."""
+    enriched = []
+    for r in results:
+        r = dict(r)
+        if r.get("source") == "products_ai" and not r.get("image_link"):
+            r["image_link"] = PRODUCTS_BY_ID.get(r.get("id", ""), {}).get("image_link", "")
+        elif r.get("source") in ("cross_sell", "alternative") and not r.get("image_link"):
+            r["image_link"] = image_for_link(r.get("product_link", ""))
+        enriched.append(r)
+    return enriched
+
+
 _rate_lock = threading.Lock()
 _rate_store = {}  # ip -> list[float] timestamps
 
 _analytics_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Lightweight per-session memory (in-memory, resets on restart -- same
+# tradeoff as rate limiting). This ONLY remembers which recipe(s) were last
+# discussed in a session, so a short follow-up like "a čo soľ?" can be
+# resolved against that recipe's real ingredient list. It does not attempt
+# general multi-turn understanding -- if the follow-up doesn't match any
+# ingredient text from the remembered recipe, it is treated as a normal,
+# independent question.
+# ---------------------------------------------------------------------------
+_session_lock = threading.Lock()
+_session_store = {}  # session_id -> {"recipes": [...], "ts": float}
+SESSION_TTL_SECONDS = 1800  # 30 min
+
+
+def remember_session_recipes(session_id, recipes):
+    if not session_id or not recipes:
+        return
+    with _session_lock:
+        _session_store[session_id] = {"recipes": recipes, "ts": time.time()}
+
+
+def get_session_recipes(session_id):
+    if not session_id:
+        return []
+    with _session_lock:
+        entry = _session_store.get(session_id)
+        if not entry:
+            return []
+        if time.time() - entry["ts"] > SESSION_TTL_SECONDS:
+            del _session_store[session_id]
+            return []
+        return entry["recipes"]
 
 
 # ---------------------------------------------------------------------------
@@ -137,11 +201,15 @@ def build_ingredient_line(ing, curated_links):
     if status == "matched" and ing.get("product_matches"):
         matches = ing["product_matches"]
         best = matches[0]
+        # Enrich with the real product image (products.json), looked up by
+        # product_id -- the ingredient matcher itself never stored images.
+        best_with_image = dict(best)
+        best_with_image["image_link"] = PRODUCTS_BY_ID.get(best.get("product_id", ""), {}).get("image_link", "")
         line["suggestion"] = {
             "type": "product_match",
             "confidence": best.get("match_confidence", ""),
             "confidence_label": CONFIDENCE_LABEL.get(best.get("match_confidence", ""), ""),
-            "product": best,
+            "product": best_with_image,
             "other_matches": matches[1:],
         }
         return line
@@ -162,6 +230,121 @@ def build_ingredient_line(ing, curated_links):
 
     line["suggestion"] = {"type": "none", "message": ""}
     return line
+
+
+def build_shopping_list_summary(lines):
+    """Collapse the per-ingredient lines into one 'shopping list' view --
+    every item that has a real, clickable link, plus a count of how many
+    ingredients fall into each honesty bucket. Nothing here is a new
+    judgement call -- it just re-groups the same suggestion data already
+    computed in build_ingredient_line."""
+    items = []
+    counts = {"ready": 0, "check": 0, "not_on_foodland": 0, "no_match": 0}
+    for line in lines:
+        sug = line.get("suggestion", {})
+        t = sug.get("type")
+        if t in ("inline_link", "curated_shop_link"):
+            items.append({"text": line["text"], "link": sug.get("link", ""), "note": ""})
+            counts["ready"] += 1
+        elif t == "product_match":
+            product = sug.get("product", {})
+            high = sug.get("confidence") == "high"
+            items.append({
+                "text": line["text"],
+                "link": product.get("link", ""),
+                "note": "" if high else "over si vhodnosť",
+            })
+            counts["ready" if high else "check"] += 1
+        elif t == "generic_staple":
+            counts["not_on_foodland"] += 1
+        elif t == "no_match":
+            counts["no_match"] += 1
+    return {"items": items, "counts": counts}
+
+
+def gather_related_suggestions(lines, limit=3):
+    """Real cross-sell / alternative tips for the products actually matched
+    to this recipe's ingredients -- looked up from the same cross_sell /
+    alternatives tables the rest of the backend uses, keyed by product_id.
+    Never invented; skipped entirely if no matched product has any row."""
+    seen_links = set()
+    for line in lines:
+        sug = line.get("suggestion", {})
+        if sug.get("type") == "product_match":
+            seen_links.add(sug.get("product", {}).get("link", ""))
+        elif sug.get("type") in ("inline_link", "curated_shop_link"):
+            seen_links.add(sug.get("link", ""))
+
+    extra = []
+    for line in lines:
+        sug = line.get("suggestion", {})
+        if sug.get("type") != "product_match":
+            continue
+        product_id = sug.get("product", {}).get("product_id", "")
+        for table in (CROSS_SELL_BY_ID, ALTERNATIVES_BY_ID):
+            row = table.get(product_id)
+            if not row:
+                continue
+            for s in row.get("suggestions", [])[:2]:
+                link = s.get("link", "")
+                if not link or link in seen_links:
+                    continue
+                seen_links.add(link)
+                extra.append({
+                    "title": s.get("title", ""),
+                    "link": link,
+                    "reason": s.get("reason", ""),
+                    "image_link": image_for_link(link),
+                    "based_on": sug.get("product", {}).get("title", ""),
+                })
+                if len(extra) >= limit:
+                    return extra
+    return extra
+
+
+def find_followup_ingredient_match(recipe, question):
+    """Does this question's words overlap with any ingredient line text of
+    a previously-discussed recipe? Plain token overlap, same normalize/
+    tokenize helpers used everywhere else -- no guessing beyond that."""
+    qtoks = set(search_mod.tokenize(question))
+    if not qtoks:
+        return []
+    matches = []
+    for ing in recipe.get("ingredients", []):
+        itoks = set(search_mod.tokenize(ing.get("text", "")))
+        if qtoks & itoks:
+            matches.append(ing)
+    return matches
+
+
+def build_followup_answer(session_id, question, lang):
+    """If this question doesn't match any recipe on its own, but the
+    session recently discussed one, check whether it's asking about one of
+    that recipe's real ingredients (e.g. 'a čo soľ?' right after a Kimchi
+    question). Returns None if nothing real matches -- never fabricates a
+    follow-up just to seem conversational."""
+    for recipe in get_session_recipes(session_id):
+        if not recipe.get("ingredients_available"):
+            continue
+        matched_ings = find_followup_ingredient_match(recipe, question)
+        if not matched_ings:
+            continue
+        curated_links = recipe.get("curated_shop_links", [])
+        lines = [build_ingredient_line(ing, curated_links) for ing in matched_ings]
+        sk_url = recipe.get("urls", {}).get("SK", "")
+        fallback_url = next((u for u in recipe.get("urls", {}).values() if u), "")
+        return {
+            "recipe_name": recipe.get("name", ""),
+            "cuisine": recipe.get("cuisine", ""),
+            "ingredients_available": True,
+            "is_followup": True,
+            "followup_note": f"Pokračujem v predošlej otázke k receptu „{recipe.get('name', '')}“.",
+            "recipe_link": sk_url or fallback_url,
+            "ingredients": lines,
+            "shopping_list": build_shopping_list_summary(lines),
+            "related_suggestions": gather_related_suggestions(lines),
+        }
+    return None
 
 
 def build_recipe_answer(recipe):
@@ -201,20 +384,25 @@ def build_recipe_answer(recipe):
         "source_url": recipe.get("ingredient_source_url", ""),
         "recipe_link": sk_url or fallback_url,
         "ingredients": lines,
+        "shopping_list": build_shopping_list_summary(lines),
+        "related_suggestions": gather_related_suggestions(lines),
     }
 
 
-def build_recipe_answers(question, lang):
-    """Find the best-matching recipe(s) for this question and build full
-    ingredient breakdowns. Ties at the top score are all included (capped
-    at 3) rather than silently guessing one -- e.g. a bare 'Kimchi' query
-    matches several real Kimchi recipes equally well."""
+def find_top_recipes(question, lang):
+    """The best-matching recipe(s) for this question, as raw recipe dicts.
+    Ties at the top score are all included (capped at 3) rather than
+    silently guessing one -- e.g. a bare 'Kimchi' query matches several
+    real Kimchi recipes equally well."""
     results = search_mod.search_recipes(question, KNOWLEDGE, lang=lang, limit=10)
     if not results:
         return []
     top_score = results[0]["score"]
-    tied = [r for r in results if r["score"] == top_score][:3]
-    return [build_recipe_answer(r) for r in tied]
+    return [r for r in results if r["score"] == top_score][:3]
+
+
+def build_recipe_answers(recipes):
+    return [build_recipe_answer(r) for r in recipes]
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +522,7 @@ class Handler(BaseHTTPRequestHandler):
             results += search_mod.search_products_ai(q, KNOWLEDGE, limit=10)
             results += search_mod.search_intent_mapping(q, KNOWLEDGE, lang, limit=10)
             results.sort(key=lambda r: -r["score"])
+            results = enrich_results_with_images(results)
             self._send_json(200, {"query": q, "lang": lang, "count": len(results), "results": results})
             return
 
@@ -364,12 +553,25 @@ class Handler(BaseHTTPRequestHandler):
 
         question = (body.get("question") or "").strip()
         lang = (body.get("lang") or "SK").strip().upper()
+        session_id = (body.get("session_id") or "").strip()
         if not question:
             self._send_json(400, {"error": "missing required field 'question'"})
             return
 
         search_results = search_mod.search_all(question, PRODUCTS, KNOWLEDGE, lang=lang, limit_per_source=5)
-        recipe_answers = build_recipe_answers(question, lang)
+        search_results = enrich_results_with_images(search_results)
+        top_recipes = find_top_recipes(question, lang)
+        recipe_answers = build_recipe_answers(top_recipes)
+
+        if recipe_answers:
+            remember_session_recipes(session_id, top_recipes)
+        elif session_id:
+            # No recipe matched this question directly -- check whether it's
+            # a real follow-up about a recipe discussed earlier in this
+            # session (e.g. "a čo soľ?" right after a Kimchi question).
+            followup = build_followup_answer(session_id, question, lang)
+            if followup:
+                recipe_answers = [followup]
 
         if OPENAI_API_KEY:
             try:
