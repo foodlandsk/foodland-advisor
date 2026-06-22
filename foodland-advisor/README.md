@@ -103,13 +103,15 @@ backend bezpečne vráti k `search_only` odpovedi -- `/ask` nikdy nevráti 500.
   riešený recept, backend skontroluje, či sa otázka prekrýva s reálnym
   textom niektorej jeho ingrediencie (napr. "a čo soľ?" po otázke na
   Kimchi) -- ak áno, vráti `is_followup: true` a `followup_note` s názvom
-  receptu. **Dôležité obmedzenie:** keďže recept-vyhľadávanie (`search_recipes`)
-  nemá filter bežných slov ("je", "a", "vás"...), krátke follow-up otázky
-  často omylom zasiahnu nejaký recept priamo (cez zhodu na takéto bežné
-  slovo) -- v tom prípade sa vráti táto (síce reálna, ale nie vždy
-  najrelevantnejšia) priama zhoda namiesto `is_followup` odpovede. Funkcia
-  teda funguje spoľahlivo len pre otázky, ktoré cez bežné vyhľadávanie
-  nezasiahnu žiadny recept.
+  receptu. Porovnávanie tokenov ignoruje bežné slová ("je", "a", "vás"...)
+  -- pozri `STOPWORDS`/`meaningful_tokens()` v `search.py` nižšie -- takže
+  krátka follow-up otázka už nezasiahne nejaký iný recept omylom len cez
+  takéto bežné slovo. Ak ide o slovo, ktoré je skutočnou, ale medzi
+  viacerými receptami bežnou ingredienciou (napr. "gochujang" sa vyskytuje
+  vo viacerých kórejských receptoch), `/ask` korektne vráti priame zhody na
+  tieto recepty namiesto `is_followup` odpovede -- to je správne (reálna
+  zhoda, nie chyba), len to znamená, že `is_followup` sa typicky uplatní
+  pri otázkach na ingrediencie špecifické pre jeden konkrétny recept.
 
 ## Ingrediencie receptov -- ako sa vyberá produktový tip
 
@@ -194,11 +196,15 @@ aktuálny stav na railway.com pred nasadením.
   kód je napísaný a zapojený tak, aby pri zlyhaní volania bezpečne spadol
   na `search_only`, ale samotné úspešné LLM volanie si over až s reálnym
   kľúčom.
-- `search.py` nemá zoznam bežných slov (stopwords) -- krátke slová ako
-  "je", "a", "vás" sa počítajú ako plnohodnotné zhody. V praxi to znamená,
-  že aj otázky mimo tému (napr. o vrátení tovaru) môžu omylom "trafiť"
-  nejaký recept len cez takéto bežné slovo. Priamo to ovplyvňuje aj nový
-  follow-up mechanizmus (pozri vyššie) -- testované a overené priamym
-  jednotkovým testom správania `build_followup_answer`, integračne sa to
-  ale cez `/ask` prejaví len pri otázkach, ktoré takto omylom nezasiahnu
-  žiadny recept.
+- `search.py` mal pôvodne medzeru: chýbal zoznam bežných slov (stopwords),
+  takže krátke slová ako "je", "a", "vás" sa počítali ako plnohodnotné
+  zhody a otázky mimo tému (napr. o vrátení tovaru) mohli omylom "trafiť"
+  nejaký recept len cez takéto bežné slovo. **Opravené:** `search.py` má
+  teraz `STOPWORDS` množinu (SK/CZ funkčné slová + zopár EN) a
+  `meaningful_tokens()` helper, ktorý sa z oboch strán (otázka aj
+  dokument) odpočíta pred počítaním zhody v `_score()` -- platí pre
+  všetkých 7 typov vyhľadávania (produkty, FAQ, recepty, blog, cross-sell,
+  alternatívy, products_ai, intent_mapping) aj pre follow-up matcher v
+  `main.py`. Overené priamym testom (`aký je váš vratový poriadok?` už
+  správne vráti 0 zhôd, kým `Kimchi` aj `gochujang` zhody ostali nezmenené)
+  aj cez živý `/ask` endpoint.

@@ -15,6 +15,41 @@ DATA_DIR = APP_DIR.parent / "data"
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Common SK/CZ function words (pronouns, prepositions, conjunctions,
+# question words, "byť"/"mať"/"chcieť" forms...) plus a handful of EN
+# equivalents. Stored already diacritic-stripped + lowercase (matching what
+# tokenize() produces) so it can be subtracted from token sets directly.
+# Purpose: a lone shared word like "je"/"a"/"vás" must never by itself count
+# as a real match signal -- only real keyword overlap should.
+STOPWORDS = {
+    "a", "aj", "ak", "ako", "aky", "akych", "akej", "akeho", "akym", "akymi", "akom",
+    "ale", "alebo", "ani", "az",
+    "bez", "bol", "bola", "bolo", "boli", "bude", "budem", "budes", "budeme",
+    "budete", "budu", "by", "byt", "byva",
+    "co", "cim", "ci", "cez",
+    "dakujem", "do",
+    "ho",
+    "i", "ich", "im", "ina", "ine", "iny", "inu",
+    "ja", "je", "jej", "jeho", "jej",
+    "k", "ku", "kam", "kde", "kedy", "kto", "ktora", "ktore", "ktori", "ktory",
+    "ktorych", "ktorej", "ktoreho", "ktorym",
+    "ma", "mam", "mas", "mame", "mate", "maju", "mna", "mne", "moj", "moja",
+    "moje", "my", "mi",
+    "na", "nad", "nam", "nas", "nasa", "nase", "nasi", "ne", "nech", "neho",
+    "nej", "nie", "nim", "ni", "no",
+    "o", "od", "on", "ona", "ono", "oni", "ony",
+    "po", "pod", "pre", "preco", "pri", "prosim", "potrebujem", "potrebujes",
+    "potrebuje", "potrebujeme", "potrebujete", "potrebuju",
+    "s", "sa", "si", "so", "som", "su", "sme", "ste",
+    "ta", "tak", "tam", "tato", "te", "teba", "tebe", "ten", "tento", "tej",
+    "teho", "tieto", "tie", "tito", "to", "toto", "tu", "ty", "tym", "tymi",
+    "v", "vam", "vas", "vasa", "vase", "vasej", "vasho", "vami", "vdaka", "vo",
+    "z", "za", "ze", "zo",
+    "chcem", "chces", "chce", "chceme", "chcete", "chcu",
+    "the", "is", "are", "and", "or", "to", "of", "for", "in", "on", "with",
+    "you", "your", "need", "want", "what", "how", "do", "does",
+}
+
 
 def normalize(s):
     if not s:
@@ -27,6 +62,13 @@ def normalize(s):
 
 def tokenize(s):
     return _TOKEN_RE.findall(normalize(s))
+
+
+def meaningful_tokens(s):
+    """tokenize() with stopwords removed -- use this whenever token overlap
+    is the actual relevance signal (i.e. everywhere except _score's
+    boost_field substring check, which already requires the whole query)."""
+    return set(tokenize(s)) - STOPWORDS
 
 
 def load_products(path=None):
@@ -44,11 +86,18 @@ def load_knowledge(path=None):
 def _score(query_tokens, query_norm, fields, boost_field=""):
     """fields: list of raw text strings to match tokens against.
     boost_field: the single most important field (title/question/intent) --
-    an exact substring hit there is a strong signal."""
+    an exact substring hit there is a strong signal.
+
+    Stopwords are stripped from BOTH sides before the overlap is counted, so
+    a question and a document that only share common words like "je"/"a"/
+    "vás" score 0 instead of registering a false match -- only genuine
+    keyword overlap counts."""
     combined_tokens = set()
     for f in fields:
         combined_tokens.update(tokenize(f))
-    score = len(query_tokens & combined_tokens)
+    combined_tokens -= STOPWORDS
+    meaningful_query = query_tokens - STOPWORDS
+    score = len(meaningful_query & combined_tokens)
     if boost_field and query_norm and query_norm in normalize(boost_field):
         score += 5
     return score

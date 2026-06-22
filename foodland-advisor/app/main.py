@@ -163,10 +163,10 @@ def log_analytics(ip, question, mode, result_count):
 def _curated_match(ingredient_text, curated_links):
     """Does this ingredient line correspond to a curated_shop_links entry?
     Token-overlap check (diacritic/case-insensitive), real data only."""
-    text_tokens = set(search_mod.tokenize(ingredient_text))
+    text_tokens = search_mod.meaningful_tokens(ingredient_text)
     best = None
     for c in curated_links:
-        c_tokens = set(search_mod.tokenize(c.get("ingredient", "")))
+        c_tokens = search_mod.meaningful_tokens(c.get("ingredient", ""))
         if c_tokens and c_tokens.issubset(text_tokens):
             return c
         if c_tokens and (c_tokens & text_tokens) and best is None:
@@ -304,14 +304,15 @@ def gather_related_suggestions(lines, limit=3):
 
 def find_followup_ingredient_match(recipe, question):
     """Does this question's words overlap with any ingredient line text of
-    a previously-discussed recipe? Plain token overlap, same normalize/
-    tokenize helpers used everywhere else -- no guessing beyond that."""
-    qtoks = set(search_mod.tokenize(question))
+    a previously-discussed recipe? Stopword-filtered token overlap (same
+    meaningful_tokens() helper used by search.py) -- common words like
+    "a"/"je"/"vás" never count as a match on their own, only real keywords."""
+    qtoks = search_mod.meaningful_tokens(question)
     if not qtoks:
         return []
     matches = []
     for ing in recipe.get("ingredients", []):
-        itoks = set(search_mod.tokenize(ing.get("text", "")))
+        itoks = search_mod.meaningful_tokens(ing.get("text", ""))
         if qtoks & itoks:
             matches.append(ing)
     return matches
