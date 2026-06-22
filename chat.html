@@ -85,19 +85,11 @@
   .tag.miss { background: #fdeaea; color: #b42318; }
   .results-group { margin-top: 10px; }
   .results-group h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 10px 0 4px; }
-  .result-item { padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .result-item { padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
   .result-item:first-child { border-top: none; }
   .result-item a { color: var(--green-dark); text-decoration: none; font-weight: 500; }
   .result-item a:hover { text-decoration: underline; }
   .price { color: var(--muted); font-size: 12px; }
-  .thumb { width: 36px; height: 36px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background: #f0f0f0; }
-  .suggestion-row { display: flex; align-items: center; gap: 8px; }
-  .shopping-list, .related-box { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
-  .shopping-list h4, .related-box h4 { font-size: 12.5px; margin: 0 0 6px; color: var(--green-dark); }
-  ul.shop-items { list-style: none; margin: 0; padding: 0; }
-  ul.shop-items li { padding: 4px 0; font-size: 13px; }
-  .related-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
-  .followup-note { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-style: italic; }
   footer {
     flex-shrink: 0;
     padding: 12px 16px;
@@ -168,9 +160,6 @@ const qEl = document.getElementById('q');
 const langEl = document.getElementById('lang');
 const sendEl = document.getElementById('send');
 const statusEl = document.getElementById('status');
-const SESSION_ID = (window.crypto && crypto.randomUUID)
-  ? crypto.randomUUID()
-  : ('s_' + Date.now() + '_' + Math.random().toString(36).slice(2));
 
 function esc(s) {
   return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -206,8 +195,7 @@ function suggestionHtml(s) {
   if (s.type === 'product_match') {
     const p = s.product;
     const tagClass = s.confidence === 'high' ? '' : 'medium';
-    const img = p.image_link ? `<img class="thumb" src="${esc(p.image_link)}" alt="">` : '';
-    let html = `<div class="suggestion"><div class="suggestion-row">${img}<span>${esc(s.confidence_label)}: <a href="${esc(p.link)}" target="_blank">${esc(p.title)}</a> &mdash; ${esc(p.price)}<span class="tag ${tagClass}">${esc(s.confidence)} zhoda</span></span></div></div>`;
+    let html = `<div class="suggestion">${esc(s.confidence_label)}: <a href="${esc(p.link)}" target="_blank">${esc(p.title)}</a> &mdash; ${esc(p.price)}<span class="tag ${tagClass}">${esc(s.confidence)} zhoda</span></div>`;
     return html;
   }
   if (s.type === 'generic_staple') {
@@ -219,46 +207,10 @@ function suggestionHtml(s) {
   return '';
 }
 
-function renderShoppingList(summary) {
-  if (!summary || !summary.items || !summary.items.length) return '';
-  let html = '<div class="shopping-list"><h4>🛒 Súhrnný nákupný zoznam</h4><ul class="shop-items">';
-  for (const it of summary.items) {
-    const label = it.link ? `<a href="${esc(it.link)}" target="_blank">${esc(it.text)}</a>` : esc(it.text);
-    const note = it.note ? ` <span class="tag medium">${esc(it.note)}</span>` : '';
-    html += `<li>${label}${note}</li>`;
-  }
-  html += '</ul>';
-  const c = summary.counts || {};
-  const parts = [];
-  if (c.ready) parts.push(`${c.ready} pripravených na nákup`);
-  if (c.check) parts.push(`${c.check} si over`);
-  if (c.not_on_foodland) parts.push(`${c.not_on_foodland} bežných surovin mimo ponuky`);
-  if (c.no_match) parts.push(`${c.no_match} bez zhody`);
-  if (parts.length) html += `<div class="meta">${esc(parts.join(' · '))}</div>`;
-  html += '</div>';
-  return html;
-}
-
-function renderRelatedSuggestions(list) {
-  if (!list || !list.length) return '';
-  let html = '<div class="related-box"><h4>✨ Možno sa ti zíde aj</h4>';
-  for (const s of list) {
-    const img = s.image_link ? `<img class="thumb" src="${esc(s.image_link)}" alt="">` : '';
-    const reason = s.reason ? ` &mdash; ${esc(s.reason)}` : '';
-    html += `<div class="related-item">${img}<span><a href="${esc(s.link)}" target="_blank">${esc(s.title)}</a>${reason}</span></div>`;
-  }
-  html += '</div>';
-  return html;
-}
-
 function renderRecipeAnswer(r) {
   const card = document.createElement('div');
   card.className = 'card';
-  let html = '';
-  if (r.is_followup && r.followup_note) {
-    html += `<div class="followup-note">↩ ${esc(r.followup_note)}</div>`;
-  }
-  html += `<h3>🍳 ${esc(r.recipe_name)}</h3>`;
+  let html = `<h3>🍳 ${esc(r.recipe_name)}</h3>`;
   if (r.cuisine) html += `<div class="meta">${esc(r.cuisine)}</div>`;
 
   if (!r.ingredients_available) {
@@ -280,8 +232,6 @@ function renderRecipeAnswer(r) {
   if (r.recipe_link) {
     html += `<div class="suggestion" style="margin-top:8px;"><a href="${esc(r.recipe_link)}" target="_blank">Otvoriť celý recept na Foodland.sk</a></div>`;
   }
-  html += renderShoppingList(r.shopping_list);
-  html += renderRelatedSuggestions(r.related_suggestions);
   card.innerHTML = html;
   return card;
 }
@@ -304,9 +254,6 @@ function resultLink(r, lang) {
 function resultPrice(r) {
   return r.price ? r.price : '';
 }
-function resultImage(r) {
-  return r.image_link || '';
-}
 
 function renderResultsCard(results, lang) {
   if (!results || results.length === 0) return null;
@@ -322,9 +269,7 @@ function renderResultsCard(results, lang) {
     for (const r of grouped[source].slice(0, 5)) {
       const link = resultLink(r, lang);
       const price = resultPrice(r);
-      const img = resultImage(r);
       html += `<div class="result-item">`;
-      if (img) html += `<img class="thumb" src="${esc(img)}" alt="">`;
       html += link ? `<a href="${esc(link)}" target="_blank">${esc(resultLabel(r))}</a>` : esc(resultLabel(r));
       if (price) html += ` <span class="price">${esc(price)}</span>`;
       html += `</div>`;
@@ -359,7 +304,7 @@ async function send() {
     const res = await fetch('/ask', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({question, lang, session_id: SESSION_ID})
+      body: JSON.stringify({question, lang})
     });
 
     if (res.status === 429) {
